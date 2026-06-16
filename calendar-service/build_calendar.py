@@ -106,7 +106,7 @@ def validate_dates(year: int, nfp: list[str], fomc_eve: list[str]) -> None:
             raise ValueError(f"Weekend event date looks wrong: {value}")
 
 
-def build_year(year: int, output_dir: Path) -> Path:
+def build_year(year: int, output_dir: Path, allow_skip_unavailable: bool = False) -> Path | None:
     source_parts: list[str] = []
     try:
         nfp = parse_fred_nfp(year)
@@ -126,7 +126,14 @@ def build_year(year: int, output_dir: Path) -> Path:
         fomc_eve = BUILT_IN.get(year, {}).get("FOMC_EVE", [])
         source_parts.append(f"FOMC:BUILT_IN({type(exc).__name__})")
 
-    validate_dates(year, nfp, fomc_eve)
+    try:
+        validate_dates(year, nfp, fomc_eve)
+    except ValueError as exc:
+        if allow_skip_unavailable:
+            print(f"Skipping {year}: official dates are not available or complete yet ({exc})")
+            return None
+        raise
+
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"event-calendar-{year}.txt"
     content = "\n".join(
@@ -145,12 +152,30 @@ def build_year(year: int, output_dir: Path) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--years", nargs="+", type=int, required=True)
+    parser.add_argument("--years", nargs="+", type=int)
+    parser.add_argument("--start-year", type=int, default=2025)
+    parser.add_argument("--future-years", type=int, default=2)
     parser.add_argument("--output-dir", type=Path, default=Path("public"))
     args = parser.parse_args()
-    for year in args.years:
-        path = build_year(year, args.output_dir)
-        print(path)
+
+    current_year = datetime.now(timezone.utc).year
+    years = args.years
+    if not years:
+        years = list(range(args.start_year, current_year + args.future_years + 1))
+
+    published = 0
+    for year in years:
+        path = build_year(
+            year,
+            args.output_dir,
+            allow_skip_unavailable=year > current_year,
+        )
+        if path:
+            published += 1
+            print(path)
+
+    if published == 0:
+        raise RuntimeError("No calendar years were published")
 
 
 if __name__ == "__main__":
