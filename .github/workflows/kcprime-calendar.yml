@@ -5,6 +5,10 @@ on:
     - cron: "0 11 * * *"
   workflow_dispatch:
 
+concurrency:
+  group: kcprime-calendar
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pages: write
@@ -13,6 +17,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,6 +25,47 @@ jobs:
           python-version: "3.11"
       - run: pip install -r calendar-service/requirements.txt
       - run: python calendar-service/build_calendar.py --start-year 2025 --future-years 2 --output-dir public
+      - name: Monthly heartbeat commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          heartbeat_file="calendar-service/heartbeat.txt"
+          current_month="$(date -u +'%Y-%m')"
+          previous_month=""
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin "${GITHUB_REF_NAME:-main}"
+
+          if [ -f "$heartbeat_file" ]; then
+            previous_month="$(grep '^HeartbeatMonth=' "$heartbeat_file" | cut -d= -f2 || true)"
+          fi
+
+          if [ "$previous_month" = "$current_month" ]; then
+            echo "Heartbeat already committed for $current_month."
+            exit 0
+          fi
+
+          mkdir -p "$(dirname "$heartbeat_file")"
+          {
+            echo "Purpose=Keeps the KCPrime Calendar scheduled workflow active."
+            echo "HeartbeatMonth=$current_month"
+            echo "LastRunUtc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "Repository=$GITHUB_REPOSITORY"
+            echo "RunId=$GITHUB_RUN_ID"
+            echo "RunUrl=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$heartbeat_file"
+
+          git add "$heartbeat_file"
+
+          if git diff --cached --quiet; then
+            echo "No heartbeat changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: monthly KCPrime calendar heartbeat"
+          git push origin "HEAD:${GITHUB_REF_NAME:-main}"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public
