@@ -66,6 +66,11 @@ jobs:
 
           git commit -m "chore: monthly KCPrime calendar heartbeat"
           git push origin "HEAD:${GITHUB_REF_NAME:-main}"
+      - name: Home and not-found page
+        shell: bash
+        run: |
+          printf '%s\n' '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Knyaw Capital</title><style>html,body{height:100%;margin:0}body{display:flex;align-items:center;justify-content:center;background:#0D1B2E;font-family:Poppins,Arial,sans-serif}h1{margin:0;font-size:28px;letter-spacing:.04em;color:#FFFFFF;font-weight:800}h1 span{font-weight:300;color:#3DB27A}</style></head><body><h1>KNYAW <span>CAPITAL</span></h1></body></html>' > public/index.html
+          cp public/index.html public/404.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public
