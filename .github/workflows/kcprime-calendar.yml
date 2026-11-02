@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "0 11 * * *"
   workflow_dispatch:
+  push:                       # a change to the service publishes at once
+    branches: [main]
+    paths:
+      - "calendar-service/build_calendar.py"
+      - "calendar-service/requirements.txt"
+      - ".github/workflows/kcprime-calendar.yml"
 
 concurrency:
   group: kcprime-calendar
