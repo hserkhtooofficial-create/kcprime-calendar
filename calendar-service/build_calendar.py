@@ -1,181 +1,189 @@
+"""Builds the event calendar files the KC Prime bot downloads (event-calendar-<year>.txt): the jobs-report (NFP) days and the
+FOMC eves (first day of each scheduled two-day Fed meeting) of each year.
+
+Sources, all official:
+  jobs reports: BLS Employment Situation archive (past releases) + BLS release schedule (upcoming, about 14 months ahead);
+                the BLS iCalendar feed is a cross-check only.
+  FOMC eves:    the Federal Reserve's FOMC calendar page, read year by year from its "<year> FOMC Meetings" panels.
+
+A year is published only when its dates pass the checks (count, weekdays, year). A year that passed is saved in verified/ and
+committed by the workflow; when a later download fails or looks wrong, that saved copy is published again and the run is
+marked as needing attention (warnings.txt), so the bot never gets a partial or invented list. There are no typed-in dates.
+"""
 from __future__ import annotations
 
 import argparse
-import calendar
 import re
-from datetime import datetime, timezone
+import urllib.request
+from datetime import date, datetime, timezone
 from pathlib import Path
 
-import requests
 from bs4 import BeautifulSoup
 
-
-FRED_EMPLOYMENT_SITUATION_RID = 50
-FED_FOMC_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
-
-BUILT_IN = {
-    2025: {
-        "NFP": [
-            "2025-04-04", "2025-05-02", "2025-06-06", "2025-07-03",
-            "2025-08-01", "2025-09-05", "2025-11-20", "2025-12-16",
-        ],
-        "FOMC_EVE": [
-            "2025-03-18", "2025-05-06", "2025-06-17", "2025-07-29",
-            "2025-09-16", "2025-10-28", "2025-12-09",
-        ],
-    },
-    2026: {
-        "NFP": [
-            "2026-01-09", "2026-02-11", "2026-03-06", "2026-04-03",
-            "2026-05-08", "2026-06-05", "2026-07-02", "2026-08-07",
-            "2026-09-04", "2026-10-02", "2026-11-06", "2026-12-04",
-        ],
-        "FOMC_EVE": [
-            "2026-01-27", "2026-03-17", "2026-04-28", "2026-06-16",
-            "2026-07-28", "2026-09-15", "2026-10-27", "2026-12-08",
-        ],
-    },
-}
+UA = {"User-Agent": "Mozilla/5.0 KCPrimeCalendarService/1.0", "Accept": "*/*"}
+BLS_SCHEDULE = "https://www.bls.gov/schedule/news_release/empsit.htm"
+BLS_ARCHIVE = "https://www.bls.gov/bls/news-release/empsit.htm"
+BLS_ICS = "https://www.bls.gov/schedule/news_release/bls.ics"
+FED_FOMC = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+MONTHS = {m: i + 1 for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
+HERE = Path(__file__).resolve().parent
 
 
 def get(url: str) -> str:
-    response = requests.get(
-        url,
-        timeout=30,
-        headers={
-            "User-Agent": "Mozilla/5.0 KCPrimeCalendarService/1.0",
-            "Accept": "text/html,application/xhtml+xml,application/xml,text/plain,*/*",
-        },
-    )
-    response.raise_for_status()
-    return response.text
+    # BLS answers Python's own urllib with this plain agent; it refuses the requests library and browser-like agents
+    # (403, checked 2026-11-02), so the service uses urllib on purpose.
+    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=45) as r:
+        return r.read().decode("utf-8", "replace")
 
 
-def parse_fred_nfp(year: int) -> list[str]:
-    url = (
-        "https://fred.stlouisfed.org/releases/calendar"
-        f"?rid={FRED_EMPLOYMENT_SITUATION_RID}&view=year"
-        f"&vs={year}-01-01&ve={year}-12-31&od=asc"
-    )
-    html = get(url)
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text(" ", strip=True)
-    pattern = re.compile(
-        r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+"
-        r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+"
-        rf"(\d{{1,2}}),\s+{year}",
-        re.IGNORECASE,
-    )
-    found: set[str] = set()
-    for match in pattern.finditer(text):
-        month = list(calendar.month_name).index(match.group(2).capitalize())
-        day = int(match.group(3))
-        found.add(f"{year:04d}-{month:02d}-{day:02d}")
-    return sorted(found)
+def month_no(name: str) -> int:
+    return MONTHS[name.strip().lower()[:3]]
 
 
-def parse_fed_fomc_eve(year: int) -> list[str]:
-    html = get(FED_FOMC_URL)
-    text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
-    start = text.find(str(year))
-    if start == -1:
-        return []
-    next_year = text.find(str(year + 1), start + 4)
-    section = text[start:next_year if next_year != -1 else len(text)]
-
-    month_names = "|".join(calendar.month_name[1:])
-    pattern = re.compile(rf"({month_names})\s+(\d{{1,2}})\s*[-\u2013]\s*(\d{{1,2}})", re.IGNORECASE)
-    found: set[str] = set()
-    for match in pattern.finditer(section):
-        month = list(calendar.month_name).index(match.group(1).capitalize())
-        first_day = int(match.group(2))
-        found.add(f"{year:04d}-{month:02d}-{first_day:02d}")
-    return sorted(found)
-
-
-def validate_dates(year: int, nfp: list[str], fomc_eve: list[str]) -> None:
-    if not (8 <= len(nfp) <= 13):
-        raise ValueError(f"NFP date count looks wrong for {year}: {len(nfp)}")
-    if not (6 <= len(fomc_eve) <= 9):
-        raise ValueError(f"FOMC Eve date count looks wrong for {year}: {len(fomc_eve)}")
-    for value in nfp + fomc_eve:
-        parsed = datetime.strptime(value, "%Y-%m-%d")
-        if parsed.year != year:
-            raise ValueError(f"Date outside requested year: {value}")
-        if parsed.weekday() >= 5:
-            raise ValueError(f"Weekend event date looks wrong: {value}")
+def bls_nfp_dates() -> set[date]:
+    """Every Employment Situation release date the BLS lists: the archive's file names (empsit_MMDDYYYY.htm) for past
+    releases and the schedule table (Release Date column, e.g. "Jan. 08, 2027") for upcoming ones."""
+    found: set[date] = set()
+    for m in re.finditer(r"empsit_(\d{2})(\d{2})(\d{4})\.htm", get(BLS_ARCHIVE)):
+        found.add(date(int(m.group(3)), int(m.group(1)), int(m.group(2))))
+    archive = len(found)
+    soup = BeautifulSoup(get(BLS_SCHEDULE), "html.parser")
+    for row in soup.select("table.release-list tbody tr"):
+        cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
+        m = re.match(r"([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),\s+(\d{4})", cells[1]) if len(cells) >= 2 else None
+        if m:
+            found.add(date(int(m.group(3)), month_no(m.group(1)), int(m.group(2))))
+    if archive == 0 or len(found) == archive:
+        raise ValueError(f"BLS pages gave {archive} archived and {len(found) - archive} scheduled releases")
+    return found
 
 
-def build_year(year: int, output_dir: Path, allow_skip_unavailable: bool = False) -> Path | None:
-    source_parts: list[str] = []
-    try:
-        nfp = parse_fred_nfp(year)
-        if not nfp:
-            raise ValueError("FRED returned no NFP dates")
-        source_parts.append("NFP:FRED")
-    except Exception as exc:
-        nfp = BUILT_IN.get(year, {}).get("NFP", [])
-        source_parts.append(f"NFP:BUILT_IN({type(exc).__name__})")
+def bls_ics_nfp_dates() -> set[date]:
+    """Cross-check: the BLS iCalendar feed's "Employment Situation" events (exact title; "... of Veterans" is a different release)."""
+    out: set[date] = set()
+    for ev in get(BLS_ICS).split("BEGIN:VEVENT")[1:]:
+        s = re.search(r"^SUMMARY:(.*)$", ev, re.M)
+        d = re.search(r"^DTSTART[^:]*:(\d{8})", ev, re.M)
+        if s and d and s.group(1).strip() == "Employment Situation":
+            out.add(datetime.strptime(d.group(1), "%Y%m%d").date())
+    return out
 
-    try:
-        fomc_eve = parse_fed_fomc_eve(year)
-        if not fomc_eve:
-            raise ValueError("Fed returned no FOMC dates")
-        source_parts.append("FOMC:FED")
-    except Exception as exc:
-        fomc_eve = BUILT_IN.get(year, {}).get("FOMC_EVE", [])
-        source_parts.append(f"FOMC:BUILT_IN({type(exc).__name__})")
 
-    try:
-        validate_dates(year, nfp, fomc_eve)
-    except ValueError as exc:
-        if allow_skip_unavailable:
-            print(f"Skipping {year}: official dates are not available or complete yet ({exc})")
-            return None
-        raise
+def fed_fomc_eves() -> dict[int, list[date]]:
+    """First day of each scheduled meeting, per "<year> FOMC Meetings" panel. A date cell like "26-27" or "31-1" with a month
+    cell like "January" or "Jan/Feb"; single-day entries (notation votes, unscheduled calls) are not two-day meetings."""
+    soup = BeautifulSoup(get(FED_FOMC), "html.parser")
+    out: dict[int, list[date]] = {}
+    for panel in soup.select("div.panel"):
+        head = panel.select_one(".panel-heading")
+        m = re.search(r"(\d{4}) FOMC Meetings", head.get_text(" ", strip=True)) if head else None
+        if not m:
+            continue
+        year = int(m.group(1))
+        days = []
+        for meeting in panel.select("div.fomc-meeting"):
+            mo, dd = meeting.select_one(".fomc-meeting__month"), meeting.select_one(".fomc-meeting__date")
+            if not mo or not dd:
+                continue
+            r = re.match(r"\s*(\d{1,2})\s*[-–]\s*(\d{1,2})\b", dd.get_text(" ", strip=True))
+            if not r:
+                continue
+            days.append(date(year, month_no(mo.get_text(" ", strip=True).split("/")[0]), int(r.group(1))))
+        out[year] = sorted(set(days))
+    if not out:
+        raise ValueError("no FOMC year panels found on the Fed page")
+    return out
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"event-calendar-{year}.txt"
-    content = "\n".join(
-        [
-            f"LastUpdatedUtc={datetime.now(timezone.utc).isoformat()}",
-            f"Year={year}",
-            f"NFP={','.join(nfp)}",
-            f"FOMC_EVE={','.join(fomc_eve)}",
-            f"Source={';'.join(source_parts)}",
-            "",
-        ]
-    )
-    path.write_text(content, encoding="utf-8")
-    return path
+
+def check_year(year: int, nfp: list[date], eves: list[date]) -> str | None:
+    """None when the dates look like a real year, else the reason."""
+    if not 10 <= len(nfp) <= 13:
+        return f"{len(nfp)} jobs-report dates (expected 10 to 13)"
+    if not 7 <= len(eves) <= 9:
+        return f"{len(eves)} FOMC eves (expected 7 to 9)"
+    for d in nfp + eves:
+        if d.year != year or d.weekday() >= 5:
+            return f"date {d} is outside {year} or on a weekend"
+    return None
+
+
+def file_text(year: int, nfp: list[date], eves: list[date], source: str) -> str:
+    return "\n".join([f"LastUpdatedUtc={datetime.now(timezone.utc).isoformat()}", f"Year={year}",
+                      f"NFP={','.join(d.isoformat() for d in nfp)}", f"FOMC_EVE={','.join(d.isoformat() for d in eves)}",
+                      f"Source={source}", ""])
+
+
+def dates_line(text: str, key: str) -> str:
+    m = re.search(rf"^{key}=(.*)$", text, re.M)
+    return m.group(1).strip() if m else ""
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--years", nargs="+", type=int)
-    parser.add_argument("--start-year", type=int, default=2025)
-    parser.add_argument("--future-years", type=int, default=2)
-    parser.add_argument("--output-dir", type=Path, default=Path("public"))
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--start-year", type=int, default=2025)
+    ap.add_argument("--future-years", type=int, default=2)
+    ap.add_argument("--output-dir", type=Path, default=Path("public"))
+    ap.add_argument("--verified-dir", type=Path, default=HERE / "verified")
+    a = ap.parse_args()
+    today = datetime.now(timezone.utc).date()
+    years = range(a.start_year, today.year + a.future_years + 1)
+    a.output_dir.mkdir(parents=True, exist_ok=True)
+    a.verified_dir.mkdir(parents=True, exist_ok=True)
+    warnings: list[str] = []
 
-    current_year = datetime.now(timezone.utc).year
-    years = args.years
-    if not years:
-        years = list(range(args.start_year, current_year + args.future_years + 1))
+    nfp_all = eves_all = None
+    try:
+        nfp_all = bls_nfp_dates()
+    except Exception as exc:
+        warnings.append(f"BLS download failed: {type(exc).__name__}: {exc}")
+    try:
+        eves_all = fed_fomc_eves()
+    except Exception as exc:
+        warnings.append(f"Fed download failed: {type(exc).__name__}: {exc}")
+    try:
+        ics = bls_ics_nfp_dates()
+        if nfp_all is not None and ics:
+            lo, hi = min(ics), max(ics)                           # the feed covers only about two years
+            for d in sorted(ics ^ nfp_all):
+                if d.year in years and lo <= d <= hi:
+                    warnings.append(f"BLS feed and BLS pages disagree on {d} ({'feed only' if d in ics else 'pages only'})")
+    except Exception as exc:
+        print(f"note: BLS feed cross-check skipped ({type(exc).__name__})")
 
     published = 0
     for year in years:
-        path = build_year(
-            year,
-            args.output_dir,
-            allow_skip_unavailable=year > current_year,
-        )
-        if path:
-            published += 1
-            print(path)
+        out, saved = a.output_dir / f"event-calendar-{year}.txt", a.verified_dir / f"event-calendar-{year}.txt"
+        nfp = sorted(d for d in (nfp_all or ()) if d.year == year)
+        eves = (eves_all or {}).get(year, [])
+        problem = "download failed" if nfp_all is None or eves_all is None else check_year(year, nfp, eves)
+        if problem is None:
+            text = file_text(year, nfp, eves, "NFP:BLS;FOMC:FED")
+            old = saved.read_text(encoding="utf-8") if saved.exists() else ""
+            if dates_line(old, "NFP") != dates_line(text, "NFP") or dates_line(old, "FOMC_EVE") != dates_line(text, "FOMC_EVE"):
+                saved.write_text(text, encoding="utf-8")          # committed by the workflow; only when the dates change
+                print(f"{year}: dates {'changed' if old else 'verified for the first time'}")
+            out.write_text(text, encoding="utf-8")
+        elif saved.exists():
+            old = saved.read_text(encoding="utf-8")
+            out.write_text(old, encoding="utf-8")
+            if year <= today.year or year == today.year + 1 and today.month >= 10:
+                warnings.append(f"{year}: {problem}; published the last verified copy")
+        elif year > today.year:
+            print(f"{year}: not published yet ({problem})")             # next year's dates are not all out yet
+            if year == today.year + 1 and today.month >= 11:
+                warnings.append(f"{year}: still not complete in {today:%B} ({problem}); the bot needs it by January")
+            continue
+        else:
+            warnings.append(f"{year}: {problem} and no verified copy; NOT published")
+            continue
+        published += 1
+        print(f"{year}: {out.read_text(encoding='utf-8').splitlines()[2]} | {out.read_text(encoding='utf-8').splitlines()[3]}")
 
+    (a.output_dir.parent / "warnings.txt").write_text("\n".join(warnings) + ("\n" if warnings else ""), encoding="utf-8")
+    for w in warnings:
+        print("WARNING:", w)
     if published == 0:
-        raise RuntimeError("No calendar years were published")
+        raise SystemExit("No calendar years were published")
 
 
 if __name__ == "__main__":

@@ -18,13 +18,37 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      warnings: ${{ steps.calendar.outputs.warnings }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - run: pip install -r calendar-service/requirements.txt
-      - run: python calendar-service/build_calendar.py --start-year 2025 --future-years 2 --output-dir public
+      - id: calendar
+        name: Build the calendar files from BLS and the Fed
+        run: |
+          python calendar-service/build_calendar.py --start-year 2025 --future-years 2 --output-dir public
+          {
+            echo "warnings<<WARNINGS_END"
+            cat warnings.txt
+            echo "WARNINGS_END"
+          } >> "$GITHUB_OUTPUT"
+      - name: Save newly verified dates
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add calendar-service/verified
+          if git diff --cached --quiet; then
+            echo "Verified dates unchanged."
+            exit 0
+          fi
+          git commit -m "Verified event dates updated from BLS and the Fed"
+          git pull --rebase origin "${GITHUB_REF_NAME:-main}"
+          git push origin "HEAD:${GITHUB_REF_NAME:-main}"
       - name: Monthly heartbeat commit
         shell: bash
         run: |
@@ -84,3 +108,16 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # A run whose sources failed still publishes the last verified dates, then ends here as failed, so GitHub emails the owner.
+  attention:
+    needs: [build, deploy]
+    if: ${{ needs.build.outputs.warnings != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Calendar needs attention
+        env:
+          WARNINGS: ${{ needs.build.outputs.warnings }}
+        run: |
+          echo "$WARNINGS"
+          exit 1
