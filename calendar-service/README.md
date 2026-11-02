@@ -23,12 +23,22 @@ The service is designed for GitHub Actions + GitHub Pages or any static host.
 
 ## Where the dates come from (since 2026-11-02)
 
-- Jobs reports (NFP): the BLS Employment Situation archive (past releases) and the BLS release schedule (about 14 months
-  ahead). The BLS iCalendar feed is used as a cross-check. BLS refuses the Python `requests` library and browser-like agents,
-  so the service downloads with Python's own `urllib`.
-- FOMC eves: the first day of each two-day meeting, read from each "<year> FOMC Meetings" panel on the Fed's calendar page.
+Two official sources for each kind of date, from two different places:
 
-A year is published only when it has 10 to 13 jobs reports and 7 to 9 FOMC eves, all on weekdays inside that year. A year that
-passed is kept in `verified/` and committed. When a download fails or looks wrong, the last verified copy is published again
-and the run ends as failed ("Calendar needs attention"), so GitHub emails the owner. There are no typed-in dates any more:
-the old built-in lists started in April 2025 and left Jan-Mar 2025 out of the published file.
+- Jobs reports (NFP): main = the BLS Employment Situation archive (past) and release schedule (about 14 months ahead);
+  second = FRED's release calendar (St. Louis Fed, current year). The BLS iCalendar feed is a further cross-check. BLS refuses
+  the Python `requests` library and browser-like agents, so the service downloads with Python's own `urllib`.
+- FOMC eves (first day of each two-day meeting): main = each "<year> FOMC Meetings" panel on the Fed's calendar page;
+  second = the Fed's calendar feed (`json/calendar.json`), the weekday before each decision day.
+
+The main source is used when it looks like a real year (10 to 13 jobs reports, 7 to 9 FOMC eves, weekdays inside that year),
+else the second one. When both have the year and disagree, or a published date changes, the run warns.
+
+- `verified/`: the last dates that passed, committed by the job. When neither source gives a real year, this copy is published
+  again. `verified/second-sources.txt` remembers since when a second source has failed (warning after a week).
+- `override/`: the team's emergency fix, see `override/README.md`.
+- `status.txt` (published next to the calendars): when the job last ran and its warnings. The license server reads it every
+  5 minutes and sends team phone alerts (Code/LicenseServer/api/_calendar.js in the kcprime-project repo). A run with warnings
+  also ends as failed ("Calendar needs attention"), so GitHub emails the owner.
+
+There are no typed-in dates: the old built-in lists started in April 2025 and left Jan-Mar 2025 out of the published file.
